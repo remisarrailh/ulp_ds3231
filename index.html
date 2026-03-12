@@ -1,0 +1,1084 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Comment fonctionne l'ULP de l'ESP32</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --card: #1a1d27;
+    --border: #2a2d3a;
+    --text: #e0e0e0;
+    --dim: #888;
+    --accent: #6c9eff;
+    --green: #4caf50;
+    --red: #ef5350;
+    --orange: #ff9800;
+    --yellow: #fdd835;
+    --purple: #b388ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 0 0 60px;
+  }
+
+  /* Header */
+  header {
+    background: linear-gradient(135deg, #1a237e, #0d47a1);
+    padding: 40px 20px;
+    text-align: center;
+  }
+  header h1 { font-size: 2em; margin-bottom: 8px; }
+  header p { color: #90caf9; font-size: 1.1em; }
+
+  /* Layout */
+  .container { max-width: 1100px; margin: 0 auto; padding: 0 20px; }
+  section { margin-top: 40px; }
+  section h2 {
+    font-size: 1.4em;
+    color: var(--accent);
+    border-bottom: 2px solid var(--border);
+    padding-bottom: 8px;
+    margin-bottom: 16px;
+  }
+
+  /* Info boxes */
+  .info-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .info-box.warning {
+    border-left: 4px solid var(--orange);
+  }
+  .info-box.warning::before {
+    content: "⚠️ ";
+  }
+  .info-box.good {
+    border-left: 4px solid var(--green);
+  }
+
+  /* Architecture diagram */
+  .arch-grid {
+    display: grid;
+    grid-template-columns: 1fr 80px 1fr;
+    gap: 10px;
+    align-items: center;
+    margin: 20px 0;
+  }
+  .arch-block {
+    background: var(--card);
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    text-align: center;
+  }
+  .arch-block.sleeping { border-color: var(--red); opacity: 0.5; }
+  .arch-block.awake { border-color: var(--green); }
+  .arch-block h3 { margin-bottom: 6px; }
+  .arch-block .power { font-size: 0.85em; }
+  .arch-arrow { text-align: center; font-size: 2em; color: var(--dim); }
+
+  /* Code display */
+  .code-container {
+    background: #0d1017;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .code-header {
+    background: var(--card);
+    padding: 8px 16px;
+    font-size: 0.85em;
+    color: var(--dim);
+    border-bottom: 1px solid var(--border);
+  }
+  .code-lines {
+    padding: 12px 0;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 0.9em;
+    line-height: 1.8;
+    overflow-x: auto;
+  }
+  .code-line {
+    display: flex;
+    padding: 2px 16px;
+    cursor: pointer;
+    transition: background 0.15s;
+    position: relative;
+  }
+  .code-line:hover { background: rgba(108, 158, 255, 0.08); }
+  .code-line.active { background: rgba(108, 158, 255, 0.15); }
+  .code-line.executing {
+    background: rgba(76, 175, 80, 0.2);
+    animation: pulse 0.8s ease-in-out;
+  }
+  @keyframes pulse {
+    0%, 100% { background: rgba(76, 175, 80, 0.15); }
+    50% { background: rgba(76, 175, 80, 0.35); }
+  }
+  .line-num {
+    color: var(--dim);
+    min-width: 30px;
+    text-align: right;
+    margin-right: 16px;
+    user-select: none;
+  }
+  .line-code { white-space: pre; }
+
+  /* Syntax colors */
+  .kw { color: #c792ea; }
+  .fn { color: #82aaff; }
+  .num { color: #f78c6c; }
+  .cmt { color: #546e7a; font-style: italic; }
+  .reg { color: #ffcb6b; }
+  .str { color: #c3e88d; }
+
+  /* Simulator */
+  .sim-container {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 20px;
+    margin-top: 16px;
+  }
+  @media (max-width: 800px) {
+    .sim-container { grid-template-columns: 1fr; }
+  }
+
+  .sim-panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .sim-panel h3 {
+    font-size: 1em;
+    color: var(--accent);
+    margin-bottom: 12px;
+  }
+
+  /* Registers */
+  .reg-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .reg-item {
+    background: #0d1017;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: border-color 0.3s, box-shadow 0.3s;
+  }
+  .reg-item.changed {
+    border-color: var(--green);
+    box-shadow: 0 0 8px rgba(76, 175, 80, 0.3);
+  }
+  .reg-name { color: var(--yellow); font-family: monospace; font-weight: bold; }
+  .reg-value { color: var(--green); font-family: monospace; font-size: 1.1em; }
+
+  /* Memory view */
+  .mem-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: monospace;
+    font-size: 0.85em;
+  }
+  .mem-table th {
+    text-align: left;
+    color: var(--dim);
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .mem-table td {
+    padding: 4px 8px;
+    border-bottom: 1px solid rgba(42, 45, 58, 0.5);
+    transition: background 0.3s, color 0.3s;
+  }
+  .mem-table tr.changed td {
+    background: rgba(76, 175, 80, 0.15);
+    color: var(--green);
+  }
+  .mem-addr { color: var(--dim); }
+  .mem-val { color: var(--accent); }
+  .mem-label { color: var(--purple); font-size: 0.85em; }
+
+  /* GPIO indicator */
+  .gpio-indicator {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding: 10px 14px;
+    background: #0d1017;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .gpio-led {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--red);
+    transition: background 0.3s, box-shadow 0.3s;
+  }
+  .gpio-led.high {
+    background: var(--green);
+    box-shadow: 0 0 12px rgba(76, 175, 80, 0.6);
+  }
+
+  /* Controls */
+  .controls {
+    display: flex;
+    gap: 8px;
+    margin: 16px 0;
+    flex-wrap: wrap;
+  }
+  .btn {
+    padding: 8px 20px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 0.9em;
+    transition: background 0.2s, border-color 0.2s;
+  }
+  .btn:hover { border-color: var(--accent); background: rgba(108, 158, 255, 0.1); }
+  .btn.primary { background: #1a237e; border-color: var(--accent); }
+  .btn.primary:hover { background: #283593; }
+
+  /* Explanation bubble */
+  .explanation {
+    background: rgba(108, 158, 255, 0.08);
+    border: 1px solid rgba(108, 158, 255, 0.3);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-top: 12px;
+    min-height: 60px;
+    font-size: 0.95em;
+    line-height: 1.5;
+  }
+  .explanation .step-title {
+    color: var(--accent);
+    font-weight: bold;
+    margin-bottom: 4px;
+  }
+
+  /* ESP state */
+  .esp-state {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #0d1017;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    margin-bottom: 12px;
+  }
+  .esp-state .dot {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--red);
+  }
+  .esp-state.awake .dot {
+    background: var(--green);
+    box-shadow: 0 0 8px rgba(76,175,80,0.6);
+  }
+
+  /* Timeline */
+  .timeline {
+    position: relative;
+    padding: 20px 0 20px 30px;
+  }
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 12px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--border);
+  }
+  .tl-item {
+    position: relative;
+    margin-bottom: 20px;
+    padding-left: 20px;
+  }
+  .tl-item::before {
+    content: '';
+    position: absolute;
+    left: -24px;
+    top: 6px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--bg);
+  }
+  .tl-item.warn::before { background: var(--orange); }
+  .tl-time { color: var(--dim); font-size: 0.85em; font-family: monospace; }
+  .tl-desc { margin-top: 4px; }
+
+  /* Slider */
+  .threshold-control {
+    display: flex; align-items: center; gap: 12px; margin: 12px 0;
+  }
+  .threshold-control input[type=range] { flex: 1; }
+  .threshold-control .val {
+    background: #0d1017;
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-family: monospace;
+    color: var(--accent);
+    min-width: 40px;
+    text-align: center;
+  }
+
+  /* SQW wave */
+  .sqw-canvas-container {
+    background: #0d1017;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    margin: 12px 0;
+  }
+  canvas { display: block; width: 100%; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ULP de l'ESP32 — Guide interactif</h1>
+  <p>Comprendre le co-processeur ultra basse consommation pas &agrave; pas</p>
+  <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin-top:18px;">
+    <a href="../ulp.ino" download="ulp.ino"
+       style="display:inline-flex; align-items:center; gap:8px;
+              background:#1a237e; border:2px solid #6c9eff; border-radius:8px;
+              padding:10px 22px; color:#fff; text-decoration:none; font-size:0.95em;
+              font-weight:bold; transition:background 0.2s;"
+       onmouseover="this.style.background='#283593'" onmouseout="this.style.background='#1a237e'">
+      ⬇️ T&eacute;l&eacute;charger ulp.ino
+    </a>
+    <a href="https://github.com/remisarrailh/ulp_ds3231" target="_blank" rel="noopener noreferrer"
+       style="display:inline-flex; align-items:center; gap:8px;
+              background:#24292e; border:2px solid #6c9eff; border-radius:8px;
+              padding:10px 22px; color:#fff; text-decoration:none; font-size:0.95em;
+              font-weight:bold; transition:background 0.2s;"
+       onmouseover="this.style.background='#3a4149'" onmouseout="this.style.background='#24292e'">
+      <svg height="18" width="18" viewBox="0 0 16 16" fill="#fff" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</header>
+
+<div class="container">
+
+<!-- ========================== SECTION 1 ========================== -->
+<section>
+  <h2>1. C'est quoi l'ULP ?</h2>
+
+  <div class="info-box">
+    L'ESP32 contient un <strong>deuxi&egrave;me processeur minuscule</strong> appel&eacute; ULP (Ultra Low Power).
+    Pendant que le processeur principal dort en deep sleep (&lt; 10 &micro;A), l'ULP reste &eacute;veill&eacute; et peut
+    surveiller des capteurs, lire des pins, et r&eacute;veiller l'ESP32 quand quelque chose se passe.
+  </div>
+
+  <div class="arch-grid">
+    <div class="arch-block sleeping">
+      <h3>ESP32 principal</h3>
+      <div>240 MHz &bull; WiFi &bull; BLE</div>
+      <div class="power" style="color:var(--red)">💤 DEEP SLEEP (~10 &micro;A esp32 seul, si leds / régulateur de tension plus haut!)</div>
+    </div>
+    <div class="arch-arrow">⟷</div>
+    <div class="arch-block awake">
+      <h3>ULP Co-processeur</h3>
+      <div>8 MHz &bull; 4 registres &bull; pas de WiFi</div>
+      <div class="power" style="color:var(--green)">✅ ACTIF (~20 &micro;A quand il tourne)</div>
+    </div>
+  </div>
+
+  <div class="info-box">
+    Ils partagent une <strong>m&eacute;moire commune</strong> : la <code>RTC_SLOW_MEM</code> (8 Ko).
+    C'est comme un tableau noir o&ugrave; l'ULP &eacute;crit et l'ESP32 lit au r&eacute;veil.
+  </div>
+</section>
+
+<!-- ========================== SECTION 2 ========================== -->
+<section>
+  <h2>2. Le signal SQW du DS3231</h2>
+
+  <div class="info-box">
+    Le DS3231 est une horloge temps r&eacute;el tr&egrave;s pr&eacute;cise. Sa pin <strong>SQW</strong> produit
+    un signal carr&eacute; : elle alterne entre HIGH et LOW &agrave; 1 Hz (1 fois par seconde).
+    L'ULP v&eacute;rifie cette pin toutes les 20 ms.
+  </div>
+
+  <div class="sqw-canvas-container">
+    <canvas id="sqwCanvas" height="80"></canvas>
+  </div>
+  <div style="text-align:center; color:var(--dim); font-size:0.85em;">
+    Signal SQW 1 Hz — chaque passage &agrave; LOW = 1 seconde &eacute;coul&eacute;e
+  </div>
+</section>
+
+<!-- ========================== SECTION 3 ========================== -->
+<section>
+  <h2>3. Le programme ULP — Simulateur interactif</h2>
+
+  <p style="color:var(--dim); margin-bottom:12px;">
+    Cliquez sur <strong>Pas suivant</strong> pour ex&eacute;cuter chaque instruction une par une.
+    Observez les registres et la m&eacute;moire changer en temps r&eacute;el.
+  </p>
+
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:16px;">
+    <div class="info-box" style="border-left:4px solid var(--yellow); padding:14px;">
+      <div style="color:var(--yellow); font-weight:bold; margin-bottom:8px;">⚡ Registres R0–R3</div>
+      <ul style="margin:0 0 0 16px; font-size:0.88em; line-height:1.9;">
+        <li>4 variables temporaires <strong>16 bits</strong></li>
+        <li>Internes au CPU ULP (ultra-rapides)</li>
+        <li><strong>Remis à 0</strong> à chaque réveil de l'ULP</li>
+        <li>Servent aux calculs intermédiaires</li>
+        <li style="color:var(--dim);">R1 = souvent une adresse · R0 = résultat</li>
+      </ul>
+    </div>
+    <div class="info-box" style="border-left:4px solid var(--purple); padding:14px;">
+      <div style="color:var(--purple); font-weight:bold; margin-bottom:8px;">💾 Mémoire RTC [30–32]</div>
+      <ul style="margin:0 0 0 16px; font-size:0.88em; line-height:1.9;">
+        <li>Tableau de mots <strong>32 bits</strong></li>
+        <li><strong>Persiste</strong> entre les cycles ULP (20 ms)</li>
+        <li><strong>Survit</strong> au deep sleep de l'ESP32</li>
+        <li>Partagée entre ULP et ESP32 au réveil</li>
+        <li style="color:var(--dim);">[30]=compteur · [31]=seuil · [32]=état GPIO</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="threshold-control">
+    <label>Seuil de r&eacute;veil :</label>
+    <input type="range" id="thresholdSlider" min="1" max="10" value="3">
+    <span class="val" id="thresholdVal">3</span>
+    <span style="color:var(--dim); font-size:0.85em;">impulsions</span>
+  </div>
+
+  <div class="sim-container">
+    <!-- Left: Code -->
+    <div>
+      <div class="code-container">
+        <div class="code-header">Programme ULP — 25 instructions</div>
+        <div class="code-lines" id="codeView"></div>
+      </div>
+      <div class="controls">
+        <button class="btn primary" id="btnStep">▶ Pas suivant</button>
+        <button class="btn" id="btnRun">⏩ Jouer tout</button>
+        <button class="btn" id="btnReset">↺ Reset</button>
+        <button class="btn" id="btnToggleGpio">🔌 Basculer GPIO</button>
+      </div>
+      <div class="explanation" id="explanation">
+        <div class="step-title">Pr&ecirc;t</div>
+        Appuyez sur &laquo; Pas suivant &raquo; pour d&eacute;marrer. L'ULP v&eacute;rifie GPIO 33 toutes les 20 ms.
+      </div>
+    </div>
+
+    <!-- Right: State -->
+    <div>
+      <div class="sim-panel">
+        <h3>GPIO 33 (SQW)</h3>
+        <div class="gpio-indicator">
+          <div class="gpio-led" id="gpioLed"></div>
+          <span id="gpioText">HIGH (1)</span>
+        </div>
+
+        <h3>Registres ULP</h3>
+        <div style="font-size:0.79em; color:var(--dim); margin:-6px 0 8px;">⚡ Variables temporaires — remis à 0 chaque cycle</div>
+        <div class="reg-grid">
+          <div class="reg-item" id="regR0box">
+            <span class="reg-name">R0</span>
+            <span class="reg-value" id="regR0">0</span>
+          </div>
+          <div class="reg-item" id="regR1box">
+            <span class="reg-name">R1</span>
+            <span class="reg-value" id="regR1">0</span>
+          </div>
+          <div class="reg-item" id="regR2box">
+            <span class="reg-name">R2</span>
+            <span class="reg-value" id="regR2">0</span>
+          </div>
+          <div class="reg-item" id="regR3box">
+            <span class="reg-name">R3</span>
+            <span class="reg-value" id="regR3">0</span>
+          </div>
+        </div>
+
+        <h3>&Eacute;tat ESP32</h3>
+        <div class="esp-state" id="espState">
+          <div class="dot"></div>
+          <span id="espText">💤 Deep Sleep</span>
+        </div>
+
+        <h3>M&eacute;moire RTC (partag&eacute;e)</h3>
+        <div style="font-size:0.79em; color:var(--dim); margin:-6px 0 8px;">💾 Persiste entre cycles et pendant le deep sleep</div>
+        <table class="mem-table">
+          <thead>
+            <tr><th>Adresse</th><th>Valeur</th><th>R&ocirc;le</th></tr>
+          </thead>
+          <tbody id="memView"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <details style="margin-top:20px;">
+    <summary style="cursor:pointer; color:var(--accent); font-weight:bold; padding:10px 14px; background:var(--card); border:1px solid var(--border); border-radius:8px; list-style:none;">📖 Référence des instructions ULP utilisées ▼</summary>
+    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(250px,1fr)); gap:8px; margin-top:12px;">
+
+      <div class="info-box" style="padding:12px; border-top:3px solid #82aaff;">
+        <code style="color:#82aaff;">I_RD_REG(reg, low, high)</code>
+        <div style="margin-top:6px; font-size:0.88em;"><strong>Lire un registre matériel</strong></div>
+        <div style="font-size:0.83em; color:var(--dim); margin-top:3px;">Lit les bits <em>low</em> à <em>high</em> du registre RTC périphérique → stocke dans <span style="color:var(--yellow);">R0</span>. Ici : état de GPIO 33 = bit 8 de RTC_GPIO_IN_REG.</div>
+      </div>
+
+      <div class="info-box" style="padding:12px; border-top:3px solid var(--orange);">
+        <code style="color:var(--orange);">I_MOVI(Rdest, valeur)</code>
+        <div style="margin-top:6px; font-size:0.88em;"><strong>Charger une constante</strong></div>
+        <div style="font-size:0.83em; color:var(--dim); margin-top:3px;"><span style="color:var(--yellow);">Rdest</span> = valeur immédiate. Sert souvent à mettre une adresse mémoire dans un registre avant un I_LD ou I_ST. Ex : I_MOVI(R1, 30) → R1 = 30.</div>
+      </div>
+
+      <div class="info-box" style="padding:12px; border-top:3px solid var(--purple);">
+        <code style="color:var(--purple);">I_LD(Rdest, Raddr, offset)</code>
+        <div style="margin-top:6px; font-size:0.88em;"><strong>Charger depuis la mémoire</strong></div>
+        <div style="font-size:0.83em; color:var(--dim); margin-top:3px;"><span style="color:var(--yellow);">Rdest</span> = MEM[<span style="color:var(--yellow);">Raddr</span> + offset]. Lit une valeur persistante. Ex : I_LD(R0, R1, 0) lit l'adresse contenue dans R1.</div>
+      </div>
+
+      <div class="info-box" style="padding:12px; border-top:3px solid var(--purple);">
+        <code style="color:var(--purple);">I_ST(Rsrc, Raddr, offset)</code>
+        <div style="margin-top:6px; font-size:0.88em;"><strong>Écrire en mémoire</strong></div>
+        <div style="font-size:0.83em; color:var(--dim); margin-top:3px;">MEM[<span style="color:var(--yellow);">Raddr</span> + offset] = <span style="color:var(--yellow);">Rsrc</span>. Sauvegarde une valeur entre deux cycles ULP, ou la transmet à l'ESP32 au réveil.</div>
+      </div>
+
+      <div class="info-box" style="padding:12px; border-top:3px solid var(--yellow);">
+        <code style="color:var(--yellow);">I_ADDI(Rdest, Rsrc, val)</code>
+        <div style="margin-top:6px; font-size:0.88em;"><strong>Addition avec constante</strong></div>
+        <div style="font-size:0.83em; color:var(--dim); margin-top:3px;"><span style="color:var(--yellow);">Rdest</span> = <span style="color:var(--yellow);">Rsrc</span> + val. Résultat sur 16 bits. Ici : R0 = R0 + 1 pour incrémenter le compteur d'impulsions.</div>
+      </div>
+
+      <div class="info-box" style="padding:12px; border-top:3px solid var(--yellow);">
+        <code style="color:var(--yellow);">I_SUBR(Rdest, Ra, Rb)</code>
+        <div style="margin-top:6px; font-size:0.88em;"><strong>Soustraction de registres</strong></div>
+        <div style="font-size:0.83em; color:var(--dim); margin-top:3px;"><span style="color:var(--yellow);">Rdest</span> = <span style="color:var(--yellow);">Ra</span> − <span style="color:var(--yellow);">Rb</span> (mod 65536). Si compteur &lt; seuil → underflow → résultat ≥ 32768. C'est l'astuce pour tester le dépassement de seuil.</div>
+      </div>
+
+      <div class="info-box" style="padding:12px; border-top:3px solid var(--accent);">
+        <code style="color:var(--accent);">I_BGE(pas, valeur)</code>
+        <div style="margin-top:6px; font-size:0.88em;"><strong>Branchement si ≥</strong></div>
+        <div style="font-size:0.83em; color:var(--dim); margin-top:3px;">Si <span style="color:var(--yellow);">R0</span> ≥ valeur → saute <em>pas</em> instructions en avant. Sinon continue à l'instruction suivante. C'est un saut relatif vers le bas.</div>
+      </div>
+
+      <div class="info-box" style="padding:12px; border-top:3px solid var(--accent);">
+        <code style="color:var(--accent);">I_BL(pas, valeur)</code>
+        <div style="margin-top:6px; font-size:0.88em;"><strong>Branchement si &lt;</strong></div>
+        <div style="font-size:0.83em; color:var(--dim); margin-top:3px;">Si <span style="color:var(--yellow);">R0</span> &lt; valeur → saute <em>pas</em> instructions en avant. Sinon continue. Inverse de I_BGE.</div>
+      </div>
+
+      <div class="info-box" style="padding:12px; border-top:3px solid var(--red);">
+        <code style="color:var(--red);">I_HALT()</code>
+        <div style="margin-top:6px; font-size:0.88em;"><strong>Suspendre l'ULP</strong></div>
+        <div style="font-size:0.83em; color:var(--dim); margin-top:3px;">L'ULP s'arrête et attend la prochaine activation du timer (ici 20 ms). <strong>Les registres R0–R3 sont perdus.</strong> La mémoire RTC conserve ses valeurs.</div>
+      </div>
+
+      <div class="info-box" style="padding:12px; border-top:3px solid var(--green);">
+        <code style="color:var(--green);">I_WAKE()</code>
+        <div style="margin-top:6px; font-size:0.88em;"><strong>Réveiller l'ESP32</strong></div>
+        <div style="font-size:0.83em; color:var(--dim); margin-top:3px;">Envoie le signal de réveil au CPU principal. L'ESP32 sort du deep sleep et exécute <code>setup()</code>. Le contenu de la mémoire RTC lui est accessible.</div>
+      </div>
+
+    </div>
+  </details>
+
+</section>
+
+
+
+</div>
+
+<script>
+// ==================== SQW Canvas ====================
+(function drawSQW() {
+  const canvas = document.getElementById('sqwCanvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = canvas.offsetWidth * 2;
+  canvas.height = 160;
+  ctx.scale(2, 2);
+  const w = canvas.offsetWidth, h = 80;
+
+  function draw(offset) {
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = '#6c9eff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    const period = w / 4;
+    for (let x = 0; x < w; x++) {
+      const t = ((x + offset) % period) / period;
+      const y = t < 0.5 ? 15 : 60;
+      x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.fillStyle = '#888';
+    ctx.font = '11px monospace';
+    ctx.fillText('HIGH', 4, 13);
+    ctx.fillText('LOW', 4, 73);
+    ctx.strokeStyle = 'rgba(136,136,136,0.3)';
+    ctx.setLineDash([4, 4]);
+    for (let i = 0; i < 5; i++) {
+      const x = i * period - (offset % period);
+      if (x > 0 && x < w) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+        ctx.fillText(i + 's', x + 3, h - 2);
+      }
+    }
+    ctx.setLineDash([]);
+  }
+
+  let offset = 0;
+  function animate() { offset += 0.5; draw(offset); requestAnimationFrame(animate); }
+  animate();
+  window.addEventListener('resize', () => { canvas.width = canvas.offsetWidth * 2; ctx.scale(2, 2); });
+})();
+
+// ==================== ULP Simulator ====================
+const instructions = [
+  { code: 'I_RD_REG(RTC_GPIO_IN_REG, ...+8, ...+8)', cmt: '// 0: R0 = état GPIO 33' },
+  { code: 'I_BGE(20, 1)',                             cmt: '// 1: R0>=1 (HIGH) → PC 21' },
+  { code: 'I_MOVI(R1, PREV_STATE_ADDR)',              cmt: '// 2: R1 = 32' },
+  { code: 'I_LD(R0, R1, 0)',                          cmt: '// 3: R0 = MEM[32] (état préc.)' },
+  { code: 'I_MOVI(R2, 0)',                            cmt: '// 4: R2 = 0' },
+  { code: 'I_ST(R2, R1, 0)',                          cmt: '// 5: MEM[32] = 0 (save LOW)' },
+  { code: 'I_BL(14, 1)',                              cmt: '// 6: préc=LOW → PC 20 (halt)' },
+  { code: 'I_MOVI(R1, COUNTER_ADDR)',                 cmt: '// 7: R1 = 30' },
+  { code: 'I_LD(R0, R1, 0)',                          cmt: '// 8: R0 = MEM[30] (compteur)' },
+  { code: 'I_ADDI(R0, R0, 1)',                        cmt: '// 9: R0 = R0 + 1' },
+  { code: 'I_ST(R0, R1, 0)',                          cmt: '// 10: MEM[30] = R0' },
+  { code: 'I_MOVI(R1, THRESHOLD_ADDR)',               cmt: '// 11: R1 = 31' },
+  { code: 'I_LD(R1, R1, 0)',                          cmt: '// 12: R1 = MEM[31] (seuil)' },
+  { code: 'I_SUBR(R0, R0, R1)',                       cmt: '// 13: R0 = compteur - seuil' },
+  { code: 'I_BL(2, 32768)',                           cmt: '// 14: R0<32768 → PC 16 (wake)' },
+  { code: 'I_HALT()',                                 cmt: '// 15: seuil pas atteint' },
+  { code: 'I_MOVI(R1, COUNTER_ADDR)',                 cmt: '// 16: R1 = 30' },
+  { code: 'I_MOVI(R0, 0)',                            cmt: '// 17: R0 = 0' },
+  { code: 'I_ST(R0, R1, 0)',                          cmt: '// 18: MEM[30] = 0 (reset cpt)' },
+  { code: 'I_WAKE()',                                 cmt: '// 19: Réveiller l\'ESP32 !' },
+  { code: 'I_HALT()',                                 cmt: '// 20: halt générique' },
+  { code: 'I_MOVI(R1, PREV_STATE_ADDR)',              cmt: '// 21: R1 = 32' },
+  { code: 'I_MOVI(R0, 1)',                            cmt: '// 22: R0 = 1 (HIGH)' },
+  { code: 'I_ST(R0, R1, 0)',                          cmt: '// 23: MEM[32] = 1 (save HIGH)' },
+  { code: 'I_HALT()',                                 cmt: '// 24: halt générique' },
+];
+
+const explanations = [
+  { title: '0 — Lecture du GPIO',
+    text: 'L\'ULP lit l\'état de la pin GPIO 33 via le registre RTC_GPIO_IN_REG (bit 8). Résultat dans <strong>R0</strong> : 1 si HIGH, 0 si LOW.' },
+  { title: '1 — Branchement si HIGH',
+    text: 'Si R0 ≥ 1 (pin HIGH), saut de 20 instructions → PC = 1+20 = <strong>21</strong> (bloc "sauver HIGH"). Si LOW, on continue à l\'instruction 2 pour vérifier si c\'est un front descendant.' },
+  { title: '2 — Adresse de l\'état précédent',
+    text: 'R1 = 32 = adresse de PREV_STATE_ADDR en mémoire RTC. C\'est là qu\'on stocke l\'état du GPIO du cycle précédent pour détecter les transitions.' },
+  { title: '3 — Charger l\'état précédent',
+    text: 'R0 = MEM[32]. On récupère l\'état du GPIO enregistré lors du cycle précédent. On va comparer avec l\'état actuel (LOW) pour détecter un front descendant HIGH→LOW.' },
+  { title: '4 — Préparer la valeur LOW',
+    text: 'R2 = 0. On prépare la valeur 0 (LOW) pour l\'écrire en mémoire.' },
+  { title: '5 — Sauver LOW en mémoire',
+    text: 'MEM[32] = 0. On met à jour l\'état précédent avec la valeur actuelle (LOW). Au prochain cycle, si la pin est encore LOW, on saura qu\'il n\'y a pas eu de nouveau front.' },
+  { title: '6 — Détecter le front descendant',
+    text: 'On teste R0 (état précédent chargé à l\'inst. 3). Si R0 &lt; 1 (il était déjà LOW) → <strong>pas de front</strong> → saut à PC = 6+14 = <strong>20</strong> (halt). Si R0 = 1 (il était HIGH) → <strong>front descendant HIGH→LOW !</strong> → on continue à 7.' },
+  { title: '7 — Adresse du compteur',
+    text: 'R1 = 30 = COUNTER_ADDR. Front descendant confirmé, on va incrémenter le compteur.' },
+  { title: '8 — Charger le compteur',
+    text: 'R0 = MEM[30]. On lit la valeur actuelle du compteur d\'impulsions (fronts descendants comptés depuis le dernier réveil).' },
+  { title: '9 — Incrémenter',
+    text: 'R0 = R0 + 1. Le compteur monte d\'un cran.' },
+  { title: '10 — Sauvegarder le compteur',
+    text: 'MEM[30] = R0. Le nouveau compteur est écrit en mémoire RTC partagée. L\'ESP32 pourra lire cette valeur à son réveil.' },
+  { title: '11 — Adresse du seuil',
+    text: 'R1 = 31 = THRESHOLD_ADDR.' },
+  { title: '12 — Charger le seuil',
+    text: 'R1 = MEM[31]. On charge la valeur du seuil configurée par l\'ESP32 (ex: 60 pour 1 minute à 1 Hz).' },
+  { title: '13 — Soustraction (test de seuil)',
+    text: 'R0 = (compteur − seuil) mod 65536. Si compteur ≥ seuil → résultat ∈ [0, 32767]. Si compteur &lt; seuil → underflow → résultat ∈ [32768, 65535].' },
+  { title: '14 — Test du résultat',
+    text: 'Si R0 &lt; 32768 → pas d\'underflow → compteur ≥ seuil → saut à PC = 14+2 = <strong>16</strong> (reset + WAKE). Sinon → underflow → compteur &lt; seuil → tombe à l\'instruction 15 (HALT).' },
+  { title: '15 — Halt (seuil pas atteint)',
+    text: 'Le seuil n\'est pas encore atteint. L\'ULP se rendort et le timer le réveillera dans 20 ms pour un nouveau cycle.' },
+  { title: '16 — Adresse du compteur (reset)',
+    text: 'R1 = 30. On se prépare à remettre le compteur à zéro <strong>avant</strong> le réveil, pour que l\'ULP reparte de 0 au prochain cycle.' },
+  { title: '17 — R0 = 0',
+    text: 'R0 = 0. Valeur à écrire pour réinitialiser le compteur.' },
+  { title: '18 — Reset du compteur',
+    text: 'MEM[30] = 0. Le compteur est remis à zéro en mémoire avant de réveiller l\'ESP32.' },
+  { title: '19 — WAKE 🔔',
+    text: '<strong>I_WAKE()</strong> envoie le signal de réveil au CPU principal. L\'ESP32 sortira du deep sleep et exécutera setup() depuis le début.' },
+  { title: '20 — Halt générique',
+    text: 'L\'ULP s\'arrête. Ce halt est atteint après le WAKE (inst. 19), ou depuis l\'inst. 6 quand l\'état précédent était déjà LOW (pas de front).' },
+  { title: '21 — Sauver HIGH : adresse',
+    text: 'On arrive ici depuis le branchement de l\'instruction 1 : la pin est HIGH. R1 = 32 = adresse de PREV_STATE.' },
+  { title: '22 — Valeur HIGH = 1',
+    text: 'R0 = 1.' },
+  { title: '23 — Sauver HIGH en mémoire',
+    text: 'MEM[32] = 1. On mémorise que la pin était HIGH à ce cycle. Si au prochain cycle elle est LOW, l\'instruction 6 détectera le front descendant.' },
+  { title: '24 — Halt générique',
+    text: 'L\'ULP se rendort. Le cycle complet reprendra dans 20 ms. La pin était HIGH : rien à faire sinon noter l\'état.' },
+];
+
+// State
+let state = {
+  pc: 0,
+  R0: 0, R1: 0, R2: 0, R3: 0,
+  gpio: 1, // 1 = HIGH
+  mem: {},
+  espAwake: false,
+  halted: false,
+  running: false,
+};
+
+function getThreshold() {
+  return parseInt(document.getElementById('thresholdSlider').value);
+}
+
+function initMem() {
+  state.mem = {};
+  state.mem[30] = 0;              // COUNTER
+  state.mem[31] = getThreshold(); // THRESHOLD
+  state.mem[32] = 1;              // PREV_STATE = HIGH au départ
+}
+
+function renderCode() {
+  const container = document.getElementById('codeView');
+  container.innerHTML = '';
+  instructions.forEach((inst, i) => {
+    const line = document.createElement('div');
+    line.className = 'code-line' + (i === state.pc ? ' active' : '');
+    line.id = 'codeLine' + i;
+    line.innerHTML = `<span class="line-num">${i}</span><span class="line-code"><span class="fn">${escHtml(inst.code)}</span>  <span class="cmt">${escHtml(inst.cmt)}</span></span>`;
+    line.onclick = () => showExplanation(i);
+    container.appendChild(line);
+  });
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function renderRegisters() {
+  ['R0','R1','R2','R3'].forEach(r => {
+    document.getElementById('reg' + r).textContent = state[r];
+  });
+}
+
+function flashReg(name) {
+  const el = document.getElementById('reg' + name + 'box');
+  el.classList.add('changed');
+  setTimeout(() => el.classList.remove('changed'), 600);
+}
+
+function renderMem() {
+  const tbody = document.getElementById('memView');
+  tbody.innerHTML = '';
+  const items = [
+    { addr: 30, label: 'COUNTER' },
+    { addr: 31, label: 'THRESHOLD' },
+    { addr: 32, label: 'PREV_STATE' },
+  ];
+  items.forEach(({addr, label}) => {
+    const tr = document.createElement('tr');
+    tr.id = 'memRow' + addr;
+    tr.innerHTML = `<td class="mem-addr">[${addr}]</td><td class="mem-val">${state.mem[addr] !== undefined ? state.mem[addr] : 0}</td><td class="mem-label">${label}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function flashMem(addr) {
+  const tr = document.getElementById('memRow' + addr);
+  if (tr) {
+    tr.classList.add('changed');
+    setTimeout(() => tr.classList.remove('changed'), 600);
+  }
+}
+
+function renderGpio() {
+  const led = document.getElementById('gpioLed');
+  const txt = document.getElementById('gpioText');
+  if (state.gpio) {
+    led.classList.add('high');
+    txt.textContent = 'HIGH (1)';
+  } else {
+    led.classList.remove('high');
+    txt.textContent = 'LOW (0) ← impulsion DS3231';
+  }
+}
+
+function renderEsp() {
+  const el = document.getElementById('espState');
+  const txt = document.getElementById('espText');
+  if (state.espAwake) {
+    el.classList.add('awake');
+    txt.textContent = '⚡ RÉVEILLÉ !';
+  } else {
+    el.classList.remove('awake');
+    txt.textContent = '💤 Deep Sleep';
+  }
+}
+
+function showExplanation(i) {
+  const el = document.getElementById('explanation');
+  const exp = explanations[i];
+  el.innerHTML = `<div class="step-title">Instruction ${i} : ${exp.title}</div>${exp.text}`;
+}
+
+function executeStep() {
+  if (state.halted || state.espAwake) return false;
+
+  const pc = state.pc;
+  const line = document.getElementById('codeLine' + pc);
+  if (line) {
+    line.classList.add('executing');
+    setTimeout(() => line.classList.remove('executing'), 600);
+  }
+
+  switch (pc) {
+    case 0: // I_RD_REG → R0 = gpio
+      state.R0 = state.gpio;
+      flashReg('R0');
+      state.pc = 1;
+      break;
+    case 1: // I_BGE(20, 1): if R0 >= 1 (HIGH) → jump to 21
+      state.pc = (state.R0 >= 1) ? 21 : 2;
+      break;
+    case 2: // I_MOVI(R1, 32)
+      state.R1 = 32;
+      flashReg('R1');
+      state.pc = 3;
+      break;
+    case 3: // I_LD(R0, R1, 0) → R0 = MEM[32]
+      state.R0 = state.mem[32] !== undefined ? state.mem[32] : 0;
+      flashReg('R0');
+      state.pc = 4;
+      break;
+    case 4: // I_MOVI(R2, 0)
+      state.R2 = 0;
+      flashReg('R2');
+      state.pc = 5;
+      break;
+    case 5: // I_ST(R2, R1, 0) → MEM[32] = 0 (save LOW)
+      state.mem[32] = 0;
+      flashMem(32);
+      renderMem();
+      state.pc = 6;
+      break;
+    case 6: // I_BL(14, 1): if R0 (prev_state) < 1 → jump to 20
+      state.pc = (state.R0 < 1) ? 20 : 7;
+      break;
+    case 7: // I_MOVI(R1, 30)
+      state.R1 = 30;
+      flashReg('R1');
+      state.pc = 8;
+      break;
+    case 8: // I_LD(R0, R1, 0) → R0 = MEM[30]
+      state.R0 = state.mem[30] !== undefined ? state.mem[30] : 0;
+      flashReg('R0');
+      state.pc = 9;
+      break;
+    case 9: // I_ADDI(R0, R0, 1)
+      state.R0 = (state.R0 + 1) & 0xFFFF;
+      flashReg('R0');
+      state.pc = 10;
+      break;
+    case 10: // I_ST(R0, R1, 0) → MEM[30] = R0
+      state.mem[30] = state.R0;
+      flashMem(30);
+      renderMem();
+      state.pc = 11;
+      break;
+    case 11: // I_MOVI(R1, 31)
+      state.R1 = 31;
+      flashReg('R1');
+      state.pc = 12;
+      break;
+    case 12: // I_LD(R1, R1, 0) → R1 = MEM[31]
+      state.R1 = state.mem[31] !== undefined ? state.mem[31] : 0;
+      flashReg('R1');
+      state.pc = 13;
+      break;
+    case 13: // I_SUBR(R0, R0, R1)
+      state.R0 = (state.R0 - state.R1) & 0xFFFF;
+      flashReg('R0');
+      state.pc = 14;
+      break;
+    case 14: // I_BL(2, 32768): if R0 < 32768 (no underflow) → jump to 16
+      state.pc = (state.R0 < 32768) ? 16 : 15;
+      break;
+    case 15: // I_HALT (threshold not reached)
+      state.halted = true;
+      break;
+    case 16: // I_MOVI(R1, 30)
+      state.R1 = 30;
+      flashReg('R1');
+      state.pc = 17;
+      break;
+    case 17: // I_MOVI(R0, 0)
+      state.R0 = 0;
+      flashReg('R0');
+      state.pc = 18;
+      break;
+    case 18: // I_ST(R0, R1, 0) → MEM[30] = 0
+      state.mem[30] = 0;
+      flashMem(30);
+      renderMem();
+      state.pc = 19;
+      break;
+    case 19: // I_WAKE
+      state.espAwake = true;
+      renderEsp();
+      state.pc = 20;
+      break;
+    case 20: // I_HALT générique
+      state.halted = true;
+      break;
+    case 21: // I_MOVI(R1, 32) — save HIGH block
+      state.R1 = 32;
+      flashReg('R1');
+      state.pc = 22;
+      break;
+    case 22: // I_MOVI(R0, 1)
+      state.R0 = 1;
+      flashReg('R0');
+      state.pc = 23;
+      break;
+    case 23: // I_ST(R0, R1, 0) → MEM[32] = 1 (save HIGH)
+      state.mem[32] = 1;
+      flashMem(32);
+      renderMem();
+      state.pc = 24;
+      break;
+    case 24: // I_HALT
+      state.halted = true;
+      break;
+  }
+
+  renderRegisters();
+  renderCode();
+  showExplanation(state.pc);
+  return true;
+}
+
+function resetSim() {
+  state.pc = 0;
+  state.R0 = 0; state.R1 = 0; state.R2 = 0; state.R3 = 0;
+  state.espAwake = false;
+  state.halted = false;
+  state.running = false;
+  initMem();
+  renderAll();
+  showExplanation(0);
+}
+
+function renderAll() {
+  renderCode();
+  renderRegisters();
+  renderMem();
+  renderGpio();
+  renderEsp();
+}
+
+function newUlpCycle() {
+  state.pc = 0;
+  state.halted = false;
+  renderCode();
+}
+
+document.getElementById('btnStep').onclick = function() {
+  if (state.espAwake) {
+    document.getElementById('explanation').innerHTML =
+      '<div class="step-title">🔔 ESP32 réveillé !</div>' +
+      'Le programme ULP a terminé. L\'ESP32 est réveillé et exécute setup(). ' +
+      'Cliquez Reset pour recommencer.';
+    return;
+  }
+  if (state.halted) {
+    newUlpCycle();
+    document.getElementById('explanation').innerHTML =
+      '<div class="step-title">⏱️ 20 ms plus tard...</div>' +
+      'Le timer RTC réveille l\'ULP. Le programme repart depuis l\'instruction 0.';
+    return;
+  }
+  executeStep();
+};
+
+document.getElementById('btnRun').onclick = function() {
+  if (state.running) return;
+  state.running = true;
+  function tick() {
+    if (!state.running) return;
+    if (state.espAwake) { state.running = false; return; }
+    if (state.halted) {
+      newUlpCycle();
+      setTimeout(tick, 400);
+      return;
+    }
+    executeStep();
+    setTimeout(tick, state.running ? 350 : 0);
+  }
+  tick();
+};
+
+document.getElementById('btnReset').onclick = resetSim;
+
+document.getElementById('btnToggleGpio').onclick = function() {
+  state.gpio = state.gpio ? 0 : 1;
+  renderGpio();
+};
+
+document.getElementById('thresholdSlider').oninput = function() {
+  document.getElementById('thresholdVal').textContent = this.value;
+  state.mem[31] = parseInt(this.value);
+  renderMem();
+};
+
+initMem();
+renderAll();
+
+// ==================== Timeline ====================
+function showTimeline(mode) {
+  const el = document.getElementById('timeline');
+  if (mode === 'ulp') {
+    el.innerHTML = `
+      <div class="tl-item"><div class="tl-time">14:00:37</div><div class="tl-desc">ESP32 démarre, lance l'ULP, entre en deep sleep</div></div>
+      <div class="tl-item warn"><div class="tl-time">14:01:37</div><div class="tl-desc">⚠️ ULP atteint 60 fronts descendants → réveil (pas à :00 !)</div></div>
+      <div class="tl-item"><div class="tl-time">14:01:42</div><div class="tl-desc">Boot (~1.6s) + test diagnostic (3s) + re-deep sleep</div></div>
+      <div class="tl-item warn"><div class="tl-time">14:02:42</div><div class="tl-desc">⚠️ Encore décalé (+5s de drift cumulé)</div></div>
+      <div class="tl-item warn"><div class="tl-time">14:03:47</div><div class="tl-desc">⚠️ Le décalage s'accumule à chaque cycle...</div></div>
+      <div class="tl-item" style="opacity:0.5"><div class="tl-time">...</div><div class="tl-desc">Le drift empire à chaque réveil</div></div>
+    `;
+  } else {
+    el.innerHTML = `
+      <div class="tl-item"><div class="tl-time">14:00:37</div><div class="tl-desc">ESP32 démarre, configure l'alarme DS3231 "chaque minute à :00", dort</div></div>
+      <div class="tl-item" style="border-left-color:var(--green)"><div class="tl-time">14:01:00</div><div class="tl-desc">✅ Alarme ! Pin INT → LOW → ESP32 se réveille exactement à la minute</div></div>
+      <div class="tl-item"><div class="tl-time">14:01:02</div><div class="tl-desc">Boot (~1.6s), fait son travail, efface l'alarme, re-dort</div></div>
+      <div class="tl-item" style="border-left-color:var(--green)"><div class="tl-time">14:02:00</div><div class="tl-desc">✅ Pile à la minute, encore une fois !</div></div>
+      <div class="tl-item" style="border-left-color:var(--green)"><div class="tl-time">14:03:00</div><div class="tl-desc">✅ Toujours synchronisé — pas de drift</div></div>
+      <div class="tl-item" style="border-left-color:var(--green)"><div class="tl-time">...</div><div class="tl-desc">Le DS3231 est précis à ±2 ppm (~1 min/an)</div></div>
+    `;
+  }
+}
+showTimeline('ulp');
+</script>
+
+</body>
+</html>
